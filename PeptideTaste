@@ -1,0 +1,189 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+from modlamp.descriptors import GlobalDescriptor
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+import joblib
+import os
+
+st.set_page_config(page_title="Peptide Taste Predictor", layout="wide")
+
+st.title("🥼 Peptide Taste Prediction App")
+st.write("Predict whether a peptide is **Sweet / Salty / Sour / Bitter** from its amino acid sequence.")
+
+# -----------------------------
+# 1. Load Dataset
+# -----------------------------
+@st.cache_data
+def load_data():
+    df = pd.read_excel("AIML.xlsx")
+    # Clean column names
+    df.columns = df.columns.str.strip()
+    return df
+
+data = load_data()
+st.subheader("Dataset Preview")
+st.dataframe(data.head())
+
+# -----------------------------
+# 2. Feature Extraction
+# -----------------------------
+def compute_features(seq_list):
+    """Compute biochemical descriptors using modlamp."""
+    if not seq_list: # Handle empty list case
+        return pd.DataFrame()
+    try:
+        gd = GlobalDescriptor(seq_list)
+        gd.calculate_all()
+        return pd.DataFrame(gd.descriptor)
+    except Exception as e:
+        st.error(f"Error computing features: {e}")
+        return pd.DataFrame()
+
+
+# -----------------------------
+# 3. Train / Load Model
+# -----------------------------
+MODEL_PATH = "taste_model.pkl"
+
+@st.cache_resource
+def train_model():
+    # Prepare data
+    # Use the correct column name 'peptide' after stripping spaces
+    X = compute_features(data["peptide"].tolist())
+    y = data["Taste"]
+
+    if X.empty:
+        st.error("Feature computation failed or returned empty DataFrame.")
+        return None, None, None, None, None
+
+    # Remove classes with <2 samples
+    counts = y.value_counts()
+    valid_classes = counts[counts >= 2].index
+    # Ensure X and y are filtered consistently
+    valid_indices = y[y.isin(valid_classes)].index
+    X = X.loc[valid_indices]
+    y = y[valid_indices]
+
+
+    if len(y.unique()) < 2:
+         st.error("Not enough classes with sufficient samples to train a model.")
+         return None, None, None, None, None
+
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    model = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=20,
+        random_state=42
+    )
+    model.fit(X_train, y_train)
+
+    # Save model
+    joblib.dump(model, MODEL_PATH)
+
+    # Evaluate
+    y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    report = classification_report(y_test, y_pred, output_dict=True)
+
+    return model, X, y, acc, report
+
+# Load or train model
+model, X, y, acc, report = train_model()
+
+if model: # Proceed only if model training was successful
+    # -----------------------------
+    # 4. Model Metrics Visualization
+    # -----------------------------
+    if acc is not None: # Only show metrics if trained in this session
+        st.success(f"Model trained with accuracy: {acc:.2f}")
+        st.write("Classification Report:", report)
+
+        # Feature Importance
+        st.subheader("📊 Feature Importance")
+        feat_importances = pd.Series(model.feature_importances_, index=X.columns)
+        feat_importances = feat_importances.sort_values(ascending=False).head(20)
+
+        fig, ax = plt.subplots(figsize=(10,6))
+        sns.barplot(x=feat_importances.values, y=feat_importances.index, ax=ax)
+        ax.set_title("Top 20 Feature Importances")
+        st.pyplot(fig)
+
+        # Confusion Matrix
+        st.subheader("🧪 Confusion Matrix")
+        y_pred_all = model.predict(X)
+        cm = confusion_matrix(y, y_pred_all, labels=model.classes_)
+        cm_df = pd.DataFrame(cm, index=model.classes_, columns=model.classes_)
+
+        fig2, ax2 = plt.subplots(figsize=(6,5))
+        sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues", ax=ax2)
+        ax2.set_xlabel("Predicted")
+        ax2.set_ylabel("Actual")
+        ax2.set_title("Confusion Matrix")
+        st.pyplot(fig2)
+
+    # -----------------------------
+    # 5. Single Sequence Prediction
+    # -----------------------------
+    st.subheader("🔬 Predict Taste of a New Peptide")
+    user_seq = st.text_input("Enter peptide sequence (e.g., EDEGEQPRPF)")
+
+    if st.button("Predict"):
+        if user_seq:
+            feats = compute_features([user_seq])
+            if not feats.empty:
+                prediction = model.predict(feats)[0]
+                probs = model.predict_proba(feats)[0]
+
+                st.success(f"Predicted Taste: **{prediction}**")
+                st.write("Class Probabilities:")
+                prob_df = pd.DataFrame({
+                    "Taste Class": model.classes_,
+                    "Probability": probs
+                })
+                st.dataframe(prob_df)
+            else:
+                st.warning("Could not compute features for the entered sequence.")
+        else:
+            st.warning("Please enter a peptide sequence.")
+
+    # -----------------------------
+    # 6. Batch Prediction
+    # -----------------------------
+    st.subheader("📤 Batch Prediction from File")
+    uploaded = st.file_uploader("Upload a CSV or Excel file with a 'peptide' column") # Updated column name
+
+    if uploaded:
+        if uploaded.name.endswith(".csv"):
+            df_up = pd.read_csv(uploaded)
+        else:
+            df_up = pd.read_excel(uploaded)
+
+        # Clean column names of uploaded file
+        df_up.columns = df_up.columns.str.strip()
+
+        if "peptide" not in df_up.columns: # Updated column name check
+            st.error("File must contain a 'peptide' column.")
+        else:
+            feats_up = compute_features(df_up["peptide"].tolist()) # Updated column name
+            if not feats_up.empty:
+                preds = model.predict(feats_up)
+                df_up["Predicted_Taste"] = preds
+                st.write("Predictions:")
+                st.dataframe(df_up)
+                st.download_button(
+                    "Download Results",
+                    df_up.to_csv(index=False).encode(),
+                    file_name="predictions.csv",
+                    mime="text/csv"
+                )
+            else:
+                 st.error("Could not compute features for the sequences in the uploaded file.")
