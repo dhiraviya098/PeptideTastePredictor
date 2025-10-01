@@ -9,4 +9,5 @@ seaborn
 joblib
 openpyxl
 requests
+py3Dmol
 
