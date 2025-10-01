@@ -1,0 +1,19 @@
+streamlit
+pandas
+numpy
+scikit-learn
+biopython
+modlamp
+matplotlib
+seaborn
+joblib
+openpyxl
+requests
+
+# AlphaFold / ColabFold dependencies
+colabfold
+jax
+jaxlib
+dm-haiku
+chex
+optax
